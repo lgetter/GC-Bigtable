@@ -1,0 +1,142 @@
+// import script
+import pandas as pd
+from google.cloud import bigtable
+from google.cloud.bigtable.row import DirectRow
+
+project_id = "concise-flame-450703-h0"
+instance_id = "ev-bigtable"
+table_id = "ev-population"
+column_family_id = "ev_info"
+csv_path = "./Electric_Vehicle_Population_Data.csv"
+
+columns = [
+    "DOL Vehicle ID",
+    "Make",
+    "Model",
+    "Model Year",
+    "Electric Range",
+    "City",
+    "County"
+]
+
+df = pd.read_csv(csv_path, dtype=str, usecols=columns).fillna("")
+
+client = bigtable.Client(project=project_id, admin=True)
+table = client.instance(instance_id).table(table_id)
+
+for index, row in df.iterrows():
+    row_key = row["DOL Vehicle ID"]
+    bt_row = DirectRow(row_key.encode("utf-8"), table=table)
+
+    for col in columns:
+        if col != "DOL Vehicle ID":
+            qualifier = col.strip().replace(" ", "_").lower()
+            value = row[col]
+            bt_row.set_cell(column_family_id, qualifier.encode("utf-8"), value.encode("utf-8"))
+
+    bt_row.commit()
+
+// api
+
+from google.cloud import bigtable
+from google.cloud.bigtable import row_filters
+from google.cloud.bigtable.row import DirectRow
+
+project_id = "concise-flame-450703-h0"
+instance_id = "ev-bigtable"
+table_id = "ev-population"
+
+client = bigtable.Client(project=project_id, admin=True)
+table = client.instance(instance_id).table(table_id)
+
+from django.contrib import admin
+from django.urls import path
+from django.http import JsonResponse, HttpResponse
+
+def total_entries(request):
+    row_count = 0
+    for row in table.read_rows():
+        row_count += 1
+    return HttpResponse(str(row_count))
+
+def best_bmw(request):
+    count = 0
+    rows = table.read_rows()
+
+    for row in rows:
+        make = None
+        electric_range = None
+
+        for column_family_name, columns in row.cells.items():
+            for column_name, cell_list in columns.items():
+                if column_name == b'make':
+                    make = cell_list[0].value.decode('utf-8')
+                elif column_name == b'electric_range':
+                    try:
+                        raw_val = cell_list[0].value.decode('utf-8').strip()
+                        if raw_val:
+                            electric_range = int(raw_val)
+                    except (ValueError, IndexError, AttributeError):
+                        continue
+
+        if make == 'BMW' and electric_range > 100:
+            count += 1
+
+    return HttpResponse(str(count))
+    
+def tesla_owners(request):
+    count = 0
+    rows = table.read_rows()
+
+    for row in rows:
+        make = None
+        city = None
+
+        for column_family_name, columns in row.cells.items():
+            for column_name, cell_list in columns.items():
+                if column_name == b'make':
+                    make = cell_list[0].value.decode('utf-8')
+                elif column_name == b'city':
+                    city = cell_list[0].value.decode('utf-8')
+
+        if make == 'TESLA' and city == 'Seattle':
+            count += 1
+
+    return HttpResponse(str(count))
+
+def update(request):
+    row = table.direct_row('257246118')
+
+    row.set_cell(
+        column_family_id='ev_info',
+        column='electric_range',
+        value=str(200),
+    )
+
+    row.commit()
+    return HttpResponse('"Success"')
+
+def delete(request):
+    filter_model_year = row_filters.ChainFilter([
+        row_filters.ColumnQualifierRegexFilter('model_year'),
+        row_filters.ValueRangeFilter(end_value='2014')
+    ])
+
+    rows = table.read_rows(filter_=filter_model_year)
+    rows.consume_all()
+
+    for row_key in rows.rows.keys():
+        direct_row = DirectRow(row_key=row_key, table=table)
+        direct_row.delete()
+        direct_row.commit()
+
+    return total_entries(request)
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('delete/', delete),
+    path('update/', update),
+    path('testla-owners', tesla_owners),
+    path('Best-BMW/', best_bmw),
+    path('rows/', total_entries)
+]
